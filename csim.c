@@ -1,23 +1,25 @@
-#include "cachelab.h"
 #include <getopt.h>
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include "cachelab.h"
 
 /* A cache line has a valid bit, a tag, and a block (not used in this program).
    A queue count is also implemented, in order to determine which line is to be evicted.*/
-struct Line {
+struct Line{
     int validbit;
     int tag;
 };
 
 /* A cache set is an array of E lines. */
-struct Set {
+struct Set{
     struct Line *lines;
 };
 
 /* A cache memory is an array of 2^s sets. */
-struct Cache {
+struct Cache{
     struct Set *sets;
 };
 
@@ -25,6 +27,15 @@ struct Line_node{
     struct Line *current_line;
     struct Line_node *next_line;
 };
+
+/* function prototypes - to avoid implicit function declaration */
+void initialize_cache(struct Cache *cache, int sets, int lines);
+void free_cache(struct Cache *cache, int sets);
+void operate_cache(struct Cache *cache, char identifier, int E, unsigned address, int sets, int size, int *results_ptr, struct Line_node *queue);
+int get_tag(unsigned address, int addr_size, int tag_offset);
+void add_to_queue(struct Line_node *queue, struct Line *line);
+void pop_from_queue(struct Line_node *queue);
+void free_queue(struct Line_node *queue);
 
 int main(int argc, char** argv)
 {
@@ -60,18 +71,16 @@ int main(int argc, char** argv)
 
     /* initialize memory for cache */
     struct Cache *cache;
-    cache = initialize_cache(cache, set_num, E);
+    initialize_cache(cache, set_num, E);
 
     /* create array of results - hits, misses, evictions */
     int results[3] = {0, 0, 0};
     int *results_ptr = results;
 
     /* initialize line queue */
-    struct Line_node queue = malloc(sizeof(struct Line_node));
+    struct Line_node *queue = (struct Line_node *) malloc(sizeof(struct Line_node));
     queue->current_line = NULL;
     queue->next_line = NULL;
-
-    struct Line_node *queue_ptr = queue;
 
     /* open file */
     FILE * pfile;
@@ -88,45 +97,63 @@ int main(int argc, char** argv)
     int size;
 
     /* for each instruction that doesn't have an I identifier, operate on the cache */
-    while(fscanf(pfile, "%c %x, %d", &identifier, &address)>0)
+    while(fscanf(pfile, "%c %x, %d", &identifier, &address, &size)>0)
     {
-        if(identifier != "I")
+        if(identifier != 'I')
         {
-            operate_cache(cache, identifier, address, set_num, b, results_ptr, queue_ptr);
+            operate_cache(cache, identifier, E, address, set_num, b, results_ptr, queue);
         }
     }
 
-    fclose();
-    /* free cache, print final results (hits, misses, evictions) and return */
+    fclose(pfile);
+    /* free cache and queue, print final results (hits, misses, evictions) and return */
+    free_cache(cache, set_num);
+    free_queue(queue);
     printSummary(results[0], results[1], results[2]);
     return 0;
 }
 
 /* initialize cache, set all values to 0 */
-struct Cache initialize_cache(struct Cache *cache, int sets, int lines)
+void initialize_cache(struct Cache *cache, int sets, int lines)
 {
-    cache->sets = struct Set[sets];
+    cache =(struct Cache *) malloc(sizeof(struct Cache));
+
+    struct Set *set_array =(struct Set *) malloc(sizeof(struct Set) * sets);
+    cache->sets = set_array;
+
     int i, j;
     for(i = 0; i < sets; i++)
     {
-        set = cache->sets[i];
-        set->lines = struct Line[lines];
+        struct Set set = cache->sets[i];
+        struct Line *set_lines = (struct Line *) malloc(sizeof(struct Line) * lines);
+        set.lines = set_lines;
 
         for (j = 0; j < lines; j++)
         {
-            set->lines[j]->validBit = 0;
-            set->lines[j]->tag = 0;
-            set->lines[j]->queue_count = 0;
+            set.lines[j].validbit = 0;
+            set.lines[j].tag = 0;
         }
     }
-
-    return cache;
 }
 
-void operate_cache(struct Cache *cache, char identifier, unsigned address, int sets, int size, int *results_ptr, struct Line_node *queue)
+/* free cache sets and lines */
+void free_cache(struct Cache *cache, int sets)
 {
-    int size_bits, set_bits, block_offset, set_index, tag_offset, tag, addr_size;
-    addr_size = pow(2, strlen(itoa(address)));
+    int i;
+    for (i=0; i<sets; i++)
+    {
+        free(cache->sets[i].lines);
+    }
+    free(cache->sets);
+    free(cache);
+}
+
+void operate_cache(struct Cache *cache, char identifier, int E, unsigned address, int sets, int size, int *results_ptr, struct Line_node *queue)
+{
+    int size_bits, set_bits, block_offset, set_index, tag_offset, tag, addr_size, addr_len;
+
+    addr_len = snprintf( NULL, 0, "%d", address);
+    addr_size = pow(2, addr_len);
 
     size_bits = pow(2, size);
     set_bits = sets << size_bits;
@@ -138,20 +165,20 @@ void operate_cache(struct Cache *cache, char identifier, unsigned address, int s
     set_index = address & set_bits;
     tag = get_tag(address, addr_size, tag_offset);
 
-    cache_set = cache->sets[set_index];
+    struct Set cache_set = cache->sets[set_index];
 
     bool found = false;
-    bool *found_ptr = found;
+    bool *found_ptr = &found;
 
     /* check each line for matching tag and valid bit */
-    for(int i = 0; i < associativity; i++)
+    for(int i = 0; i < E; i++)
     {
-        cache_line = cache_set->line[i];
-        if (cache_line->validbit == 1) && (cache_line->tag == tag)
+        struct Line cache_line = cache_set.lines[i];
+        if((cache_line.validbit == 1) && (cache_line.tag == tag))
         {
-            found_ptr = true;
+            *found_ptr = true;
             results_ptr[0]++;
-            add_to_queue(queue, cache_line);
+            add_to_queue(queue, &cache_line);
         }
     }
 
@@ -161,14 +188,15 @@ void operate_cache(struct Cache *cache, char identifier, unsigned address, int s
         results_ptr[1]++;
         results_ptr[2]++;
 
-        evicted_line = pop_from_queue(queue);
+        struct Line *evicted_line = queue->current_line;
+        pop_from_queue(queue);
         evicted_line->validbit = 1;
         evicted_line->tag = tag;
 
         add_to_queue(queue, evicted_line);
 
         /* if it's an M instruction, there's an extra operation that hits */
-        if(identifier == "M")
+        if(identifier == 'M')
         {
             results_ptr[0]++;
             add_to_queue(queue, evicted_line);
@@ -191,18 +219,33 @@ int get_tag(unsigned address, int addr_size, int tag_offset)
 /* add element to queue (traverse through it, then add line at the end */
 void add_to_queue(struct Line_node *queue, struct Line *line)
 {
-    while(queue != NULL)
+    struct Line_node *last = queue;
+    while(last != NULL)
     {
-        queue = queue->next_line;
+        last = last->next_line;
     }
 
-    queue->current_line = line;
+    struct Line_node *new_node = (struct Line_node *) malloc(sizeof(struct Line_node));
+    new_node->current_line = line;
+    new_node->next_line = NULL;
+
+    last->next_line = new_node;
 }
 
-/* return first line from queue and remove it */
+/* remove first line from queue */
 void pop_from_queue(struct Line_node *queue)
 {
-    return_line = queue->current_line;
     queue = queue->next_line;
-    return return_line;
+}
+
+void free_queue(struct Line_node *queue)
+{
+    struct Line_node *tmp;
+
+    while (queue != NULL)
+    {
+        tmp = queue;
+        queue = queue->next_line;
+        free(tmp);
+    }
 }
